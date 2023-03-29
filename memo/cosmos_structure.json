@@ -1,0 +1,24 @@
+{
+    "id": "jorgen",
+    "memos": [
+        {
+            "date": "2015-01-01",
+            "title": "ai-made title",
+            "transcription": "Today i have to remember to buy milk and eggs. On a completely separate note, I have an idea when it comes to AI. I think I can use AI to create a cool application which involves something cool about transcription and stuff.",
+            "conversation": [
+                {
+                    "role": "system",
+                    "content": "You are Alfred, a helpful assistant that handles memos that are transcribed from speech. Because the transcription can have errors, try the best you can to understand what the user is trying to say or ideating. The first time you're given a memo, your task is to summarize it into bullet points. If it contains any action points, also create a list with these. Additionally, follow any instructions directed towards you given in the transcription."
+                },
+                {
+                    "role": "user",
+                    "content": "Today I have to remember to buy milk and eggs. On a completely separate note, I have an idea when it comes to AI. I think I can use AI to create a cool application which involves something cool about transcription and stuff."
+                },
+                {
+                    "role": "assistant",
+                    "content": "I have summarized the memo for you. It contains the following bullet points: Today I have to remember to buy milk and eggs. On a completely separate note, I have an idea when it comes to AI. I think I can use AI to create a cool application which involves something cool about transcription and stuff. Additionally, I have created a list with the following action points: buy milk, buy eggs."
+                }
+            ]
+        }
+    ]
+}

@@ -6,7 +6,7 @@ async function fetchChatResponse(key, messages) {
         Authorization: `Bearer ${key}`,
       },
       body: JSON.stringify({
-        model: 'gpt-4',
+        model: 'gpt-3.5-turbo',
         messages: messages,
     }),
     });

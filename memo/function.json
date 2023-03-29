@@ -1,0 +1,38 @@
+{
+  "bindings": [
+    {
+      "authLevel": "anonymous",
+      "type": "httpTrigger",
+      "direction": "in",
+      "name": "req",
+      "methods": [
+        "post"
+      ]
+    },
+    {
+      "type": "http",
+      "direction": "out",
+      "name": "res"
+    },
+    {
+      "type": "cosmosDB",
+      "name": "outDocument",
+      "direction": "out",
+      "connectionStringSetting": "COSMOS_CONNECTION_STRING",
+      "databaseName": "memos",
+      "collectionName": "memos",
+      "Id": "jorgen",
+      "PartitionKey": "jorgen"
+    },
+    {
+      "type": "cosmosDB",
+      "name": "inDocument",
+      "direction": "in",
+      "connectionStringSetting": "COSMOS_CONNECTION_STRING",
+      "databaseName": "memos",
+      "collectionName": "memos",
+      "Id": "jorgen",
+      "PartitionKey": "jorgen"
+    }
+  ]
+}
