@@ -4,6 +4,14 @@ const { Readable } = require("stream");
 
 const { Configuration, OpenAIApi } = require("openai");
 
+const { EmailClient } = require("@azure/communication-email");
+
+const SENDER_ADDRES = "7996eff4-4419-4ba3-a0f7-2b437d7fbf34.azurecomm.netw";
+
+const connectionString =
+  process.env["COMMUNICATION_SERVICES_CONNECTION_STRING"];
+const emailClient = new EmailClient(connectionString);
+
 async function chat(messages, api_key) {
   const configuration = new Configuration({
     apiKey: api_key,
@@ -17,6 +25,61 @@ async function chat(messages, api_key) {
   return response.data.choices[0].message.content;
 }
 
+async function sendMail(
+  senderAddress,
+  recipientAddress,
+  recipientName,
+  subject,
+  plainText
+) {
+  try {
+    const message = {
+      senderAddress: senderAddress,
+      content: {
+        subject: subject,
+        plainText: plainText,
+      },
+      recipients: {
+        to: [
+          {
+            address: recipientAddress,
+            displayName: recipientName,
+          },
+        ],
+      },
+    };
+
+    const poller = await emailClient.beginSend(message);
+    const response = await poller.pollUntilDone();
+    return response;
+  } catch (e) {
+    console.log(e);
+  }
+}
+
+async function sendMemoAsMail(
+  fromAddress,
+  toAddress,
+  recipientName,
+  subject,
+  memo
+) {
+  // Generate the mail body
+  const mailBody = `Hello,
+
+  Please find attached a memo transcribed from speech that was sent to me:
+
+  Title: ${memo.title}
+
+  Conversation:
+  ${memo.conversation
+    .map((message) => `[${message.role}] ${message.content}`)
+    .join("\n")}
+  `;
+
+  // Send the mail
+  await sendMail(fromAddress, toAddress, recipientName, subject, mailBody);
+}
 
 async function getTitleFromTranscription(transcription, api_key) {
   const messages = [
@@ -38,9 +101,10 @@ async function getTitleFromTranscription(transcription, api_key) {
 module.exports = async function (context, req) {
   context.log("JavaScript HTTP trigger function processed a request.");
 
-  if (req.body && req.headers.api_key) {
+  if (req.body && req.headers.api_key && req.headers.email) {
     try {
       const api_key = req.headers.api_key;
+      const email = req.headers.email;
 
       // Add your code here.
       const formData = new FormData();
@@ -48,37 +112,32 @@ module.exports = async function (context, req) {
 
       readableStream.push(req.body);
       readableStream.push(null);
-      
-      formData.append("file", readableStream, {filename: "audio.m4a"});
+
+      formData.append("file", readableStream, { filename: "audio.m4a" });
       formData.append("model", "whisper-1");
 
       context.log("FormData " + formData);
 
-      context.log(formData.getHeaders())
+      context.log(formData.getHeaders());
 
-
-      
       context.log("Sending request to Whisper API");
-      
 
       let err = null;
-      const response = await axios.post(
-        "https://api.openai.com/v1/audio/translations",
-        formData,
-        {
+      const response = await axios
+        .post("https://api.openai.com/v1/audio/translations", formData, {
           headers: {
             ...formData.getHeaders(),
             Authorization: `Bearer ${api_key}`,
           },
-        }
-      ).catch((error) => {
-        context.log(error);
-        context.res = {
-          status: 500,
-          body: "Error in Whisper API request. " + error,
-        };
-        err = true
-      });
+        })
+        .catch((error) => {
+          context.log(error);
+          context.res = {
+            status: 500,
+            body: "Error in Whisper API request. " + error,
+          };
+          err = true;
+        });
 
       if (err) {
         return;
@@ -137,6 +196,15 @@ module.exports = async function (context, req) {
         ...doc,
         memos: [...memos, memo],
       };
+
+      // Call the function with arguments
+      sendMemoAsMail(
+        SENDER_ADDRES,
+        email,
+        "<recipient-name>",
+        "MemoGPT: " + memo.title,
+        memo
+      );
 
       context.res = {
         status: 200,
