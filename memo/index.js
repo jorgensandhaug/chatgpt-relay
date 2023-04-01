@@ -6,11 +6,15 @@ const { Configuration, OpenAIApi } = require("openai");
 
 const { EmailClient } = require("@azure/communication-email");
 
-const SENDER_ADDRES = "7996eff4-4419-4ba3-a0f7-2b437d7fbf34.azurecomm.netw";
-
 const connectionString =
   process.env["COMMUNICATION_SERVICES_CONNECTION_STRING"];
+
 const emailClient = new EmailClient(connectionString);
+
+const SENDER_ADDRESS =
+  "donotreply@7996eff4-4419-4ba3-a0f7-2b437d7fbf34.azurecomm.net";
+
+const expnd = (obj) => JSON.stringify(obj, null, 2);
 
 async function chat(messages, api_key) {
   const configuration = new Configuration({
@@ -26,6 +30,7 @@ async function chat(messages, api_key) {
 }
 
 async function sendMail(
+  context,
   senderAddress,
   recipientAddress,
   recipientName,
@@ -49,6 +54,8 @@ async function sendMail(
       },
     };
 
+    context.log("message,", expnd(message));
+
     const poller = await emailClient.beginSend(message);
     const response = await poller.pollUntilDone();
     return response;
@@ -58,6 +65,7 @@ async function sendMail(
 }
 
 async function sendMemoAsMail(
+  context,
   fromAddress,
   toAddress,
   recipientName,
@@ -73,12 +81,19 @@ async function sendMemoAsMail(
 
   Conversation:
   ${memo.conversation
-    .map((message) => `[${message.role}] ${message.content}`)
+    .map((message) => `\n\n[${message.role}] ${message.content}`)
     .join("\n")}
   `;
 
   // Send the mail
-  await sendMail(fromAddress, toAddress, recipientName, subject, mailBody);
+  return await sendMail(
+    context,
+    fromAddress,
+    toAddress,
+    recipientName,
+    subject,
+    mailBody
+  );
 }
 
 async function getTitleFromTranscription(transcription, api_key) {
@@ -105,6 +120,8 @@ module.exports = async function (context, req) {
     try {
       const api_key = req.headers.api_key;
       const email = req.headers.email;
+
+      context.log("successfully created email client");
 
       // Add your code here.
       const formData = new FormData();
@@ -149,18 +166,18 @@ module.exports = async function (context, req) {
 
       context.log("Transcription: " + transcription);
 
-      const doc = context.bindings.inDocument;
+      // const doc = context.bindings.inDocument;
 
-      if (!doc) {
-        context.res = {
-          status: 404,
-          body: "Cosmos doc not found.",
-        };
-        return;
-      }
+      // if (!doc) {
+      //   context.res = {
+      //     status: 404,
+      //     body: "Cosmos doc not found.",
+      //   };
+      //   return;
+      // }
+      // const memos = doc.memos || [];
+
       context.log("Generating title from transcription");
-      const memos = doc.memos || [];
-
       const memo = {
         date: new Date().toISOString(),
         transcription: transcription,
@@ -174,7 +191,7 @@ module.exports = async function (context, req) {
         {
           role: "system",
           content:
-            "You are Alfred, a helpful assistant that handles memos that are transcribed from speech. Because the transcription can have errors, try the best you can to understand what the user is trying to say or ideating. The first time you're given a memo, your task is to summarize it into bullet points. If it contains any action points, also create a list with these. Additionally, follow any instructions directed towards you given in the transcription.",
+            "You are Alfred, a helpful assistant that handles memos that are transcribed from speech. Because the transcription can have errors, try the best you can to understand what the user is trying to say or ideating. The first time you're given a memo, your task is to summarize it into bullet points. If it contains any action points, also create a list with these. Additionally, follow any given to you (Alfred) by the user and respond with what the user wants in addition to the Summary and Action points. Finally, if and only if the user's text contains any kind of business idea or startup idea, include a section where you help the user by expanding and exploring their idea by discussing it further with another AI assistant called Bernard. Direct the business idea discussion towards Bernard, Be concise and creative in your dialogue. If the user's text does not contain any business idea or startup idea, do not include this section. The structure of your first response should be like the following:\nSummary:\n- <bullet point 1>\n- <bullet point 2>\n\nAction Points:\n- <action point 1>\n- <action point 2>\n\n<your response to all user instructions given>. \n\nBusiness Idea:\n<your exploration of the business idea>. <Stop your first answer here>. \n\n\nAfter your first answer you will conduct a discussion with Bernard.",
         },
         {
           role: "user",
@@ -189,28 +206,104 @@ module.exports = async function (context, req) {
         content: followup,
       });
 
+      const system_prompt_assistant_2 =
+        "You are Bernard. You are a helpful assistant that loves to discuss and explore business ideas. You will talk to The AI assistant Alfred and Develop further the business idea. You should ask questions about the business idea and discuss it with Alfred. You should also give your own ideas about the business idea. Be concise and creative in your dialogue.";
+      // Now for the back and forth exploration of the business idea.
+      if (followup.includes("Business Idea:")) {
+        context.log("Business Idea found");
+        const businessIdea = followup.split("Business Idea:")[1].trim();
+        // copy messages but replace the first index with the new prompt
+
+        context.log("Business Idea: " + businessIdea);
+
+        const messages2 = [
+          {
+            role: "system",
+            content: system_prompt_assistant_2,
+          },
+          {
+            role: "user",
+            content: businessIdea,
+          },
+        ];
+
+        // 3 times back and forth
+        for (let i = 0; i < 3; i++) {
+          context.log("Business Idea Assistant iteration " + i);
+          try{
+            let bia = await chat(messages2, api_key);
+            messages2.push({
+              role: "assistant",
+              content: bia,
+            });
+            messages.push({
+              role: "user",
+              content: bia,
+            });
+
+            let alf = await chat(messages, api_key);
+            messages.push({
+              role: "assistant",
+              content: alf,
+            });
+            messages2.push({
+              role: "user",
+              content: alf,
+            });
+          }
+          catch(e){
+            context.log.error("Error in Business Idea Assistant iteration " + i + ": " + e);
+          }
+        }
+      }
+
       memo.conversation = messages;
 
-      context.log("Updating Cosmos DB document");
-      context.bindings.outDocument = {
-        ...doc,
-        memos: [...memos, memo],
-      };
+      // context.log("Updating Cosmos DB document");
+      // context.bindings.outDocument = {
+      //   ...doc,
+      //   memos: [...memos, memo],
+      // };
 
-      // Call the function with arguments
-      sendMemoAsMail(
-        SENDER_ADDRES,
-        email,
-        "<recipient-name>",
-        "MemoGPT: " + memo.title,
-        memo
-      );
+      context.log("Sending mail");
 
-      context.res = {
-        status: 200,
-        body: "Successfully transcribed and stored memo.",
-      };
-      context.log("Completed processing request");
+      try {
+        // Call the function with arguments
+        const mailStatus = await sendMemoAsMail(
+          context,
+          SENDER_ADDRESS,
+          email,
+          "<recipient-name>",
+          "MemoGPT: " + memo.title,
+          memo
+        );
+
+        context.log("Mail sent");
+        context.log(mailStatus);
+
+        //status: 'Succeeded', error: null
+        if (mailStatus.status != "Succeeded" || mailStatus.error != null) {
+          context.log.error("mail send Error:", mailStatus.error);
+          context.res = {
+            status: 500,
+            body: "Error when sending mail: " + mailStatus.error,
+          };
+          return;
+        }
+
+        context.res = {
+          status: 200,
+          body: "Successfully transcribed and sent memo.",
+        };
+
+        context.log("Completed processing request");
+      } catch (error) {
+        context.log.error("Error:", error.message);
+        context.res = {
+          status: 500,
+          body: "Error: " + error.message,
+        };
+      }
     } catch (error) {
       context.log.error("Error:", error.message);
       context.res = {
