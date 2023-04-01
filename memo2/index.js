@@ -1,320 +1,214 @@
-const axios = require("axios");
-const FormData = require("form-data");
-const { Readable } = require("stream");
+import { chat, generateTitle } from "./chat.mjs";
+import { formatEmail, sendMail } from "./email.mjs";
+import axios from "axios";
+import FormData from "form-data";
+import { Readable } from "stream";
+import { Tokenizer } from "tiktoken";
 
-const { Configuration, OpenAIApi } = require("openai");
+const tokenizer = new Tokenizer();
 
-const { EmailClient } = require("@azure/communication-email");
-
-const connectionString =
-  process.env["COMMUNICATION_SERVICES_CONNECTION_STRING"];
-
-const emailClient = new EmailClient(connectionString);
-
-const SENDER_ADDRESS =
-  "donotreply@7996eff4-4419-4ba3-a0f7-2b437d7fbf34.azurecomm.net";
-
-const expnd = (obj) => JSON.stringify(obj, null, 2);
-
-async function chat(messages, api_key) {
-  const configuration = new Configuration({
-    apiKey: api_key,
-  });
-  const openai = new OpenAIApi(configuration);
-
-  const response = await openai.createChatCompletion({
-    model: "gpt-3.5",
-    messages: messages,
-  });
-  return response.data.choices[0].message.content;
-}
-
-async function sendMail(
-  context,
-  senderAddress,
-  recipientAddress,
-  recipientName,
-  subject,
-  plainText
-) {
-  try {
-    const message = {
-      senderAddress: senderAddress,
-      content: {
-        subject: subject,
-        plainText: plainText,
-      },
-      recipients: {
-        to: [
-          {
-            address: recipientAddress,
-            displayName: recipientName,
-          },
-        ],
-      },
-    };
-
-    context.log("message,", expnd(message));
-
-    const poller = await emailClient.beginSend(message);
-    const response = await poller.pollUntilDone();
-    return response;
-  } catch (e) {
-    console.log(e);
+function numTokensFromMessages(messages) {
+    let numTokens = 0;
+  
+    for (const message of messages) {
+      numTokens += 4; // every message follows <im_start>{role/name}\n{content}<im_end>\n
+      for (const [key, value] of Object.entries(message)) {
+        numTokens += tokenizer.tokenize(value).length;
+        if (key === "name") {// if there's a name, the role is omitted
+          numTokens += -1; // role is always required and always 1 token
+        }
+      }
+    }
+  
+    numTokens += 2; // every reply is primed with <im_start>assistant
+    return numTokens;
   }
-}
 
-async function sendMemoAsMail(
-  context,
-  fromAddress,
-  toAddress,
-  recipientName,
-  subject,
-  memo
-) {
-  // Generate the mail body
-  const mailBody = `Hello,
-
-  Please find attached a memo transcribed from speech that was sent to me:
-
-  Title: ${memo.title}
-
-  Conversation:
-  ${memo.conversation
-    .map((message) => `\n\n[${message.role}] ${message.content}`)
-    .join("\n")}
-  `;
-
-  // Send the mail
-  return await sendMail(
-    context,
-    fromAddress,
-    toAddress,
-    recipientName,
-    subject,
-    mailBody
-  );
-}
-
-async function getTitleFromTranscription(transcription, api_key) {
-  const messages = [
-    {
-      role: "system",
-      content:
-        "You are a helpful assistant that generates a title for a memo from a given transcription. Try your best to create an appropriate and concise title based on the content, even if there might be errors in the transcription.",
-    },
-    {
-      role: "user",
-      content: transcription,
-    },
-  ];
-
-  const title = await chat(messages, api_key);
-  return title;
-}
 
 module.exports = async function (context, req) {
   context.log("JavaScript HTTP trigger function processed a request.");
 
-  if (req.body && req.headers.api_key && req.headers.email) {
-    try {
-      const api_key = req.headers.api_key;
-      const email = req.headers.email;
+  if (!req.body || !req.headers.api_key || !req.headers.email) {
+    context.res = {
+      status: 400,
+      body: "Missing body, api_key or email header.",
+    };
+    return;
+  }
 
-      context.log("successfully created email client");
+  try {
+    const apiKey = req.headers.api_key;
+    const email = req.headers.email;
 
-      // Add your code here.
-      const formData = new FormData();
-      const readableStream = new Readable();
+    // Add your code here.
+    const formData = new FormData();
+    const readableStream = new Readable();
 
-      readableStream.push(req.body);
-      readableStream.push(null);
+    readableStream.push(req.body);
+    readableStream.push(null);
 
-      formData.append("file", readableStream, { filename: "audio.m4a" });
-      formData.append("model", "whisper-1");
+    formData.append("file", readableStream, { filename: "audio.m4a" });
+    formData.append("model", "whisper-1");
 
-      context.log("FormData " + formData);
+    context.log("FormData " + formData);
 
-      context.log(formData.getHeaders());
+    context.log(formData.getHeaders());
 
-      context.log("Sending request to Whisper API");
+    context.log("Sending request to Whisper API");
 
-      let err = null;
-      const response = await axios
-        .post("https://api.openai.com/v1/audio/translations", formData, {
-          headers: {
-            ...formData.getHeaders(),
-            Authorization: `Bearer ${api_key}`,
-          },
-        })
-        .catch((error) => {
-          context.log(error);
-          context.res = {
-            status: 500,
-            body: "Error in Whisper API request. " + error,
-          };
-          err = true;
-        });
-
-      if (err) {
-        return;
+    const response = await axios.post(
+      "https://api.openai.com/v1/audio/translations",
+      formData,
+      {
+        headers: {
+          ...formData.getHeaders(),
+          Authorization: `Bearer ${apiKey}`,
+        },
       }
+    );
 
-      context.log("Whisper API response received");
+    context.log("Whisper API response received");
 
-      const transcription = response.data.text;
+    const transcription = response.data.text;
 
-      context.log("Transcription: " + transcription);
+    context.log("Transcription: " + transcription);
 
-      // const doc = context.bindings.inDocument;
-
-      // if (!doc) {
-      //   context.res = {
-      //     status: 404,
-      //     body: "Cosmos doc not found.",
-      //   };
-      //   return;
-      // }
-      // const memos = doc.memos || [];
-
-      context.log("Generating title from transcription");
-      const memo = {
-        date: new Date().toISOString(),
-        transcription: transcription,
-        title: await getTitleFromTranscription(transcription, api_key),
-      };
-
-      context.log(
-        "Generating bullet points, action points, and following instructions"
-      );
-      const messages = [
+    // Chatbot 3 (Idea Facilitator) processes the user's idea and instructions
+    const ideaFacilitatorResponse = await chat(
+      [
         {
           role: "system",
           content:
-            "You are Alfred, a helpful assistant that handles memos that are transcribed from speech. Because the transcription can have errors, try the best you can to understand what the user is trying to say or ideating. The first time you're given a memo, your task is to summarize it into bullet points. If it contains any action points, also create a list with these. Additionally, follow any instructions given to you (Alfred) by the user and respond with what the user wants in addition to the Summary and Action points. Finally, if and only if the user's text contains any kind of business idea or startup idea, include a section where you help the user by expanding and exploring their idea by discussing it further with another AI assistant called Bernard. Direct the business idea discussion towards Bernard, Be concise and creative in your dialogue. If the user's text does not contain any business idea or startup idea, do not include this section. The structure of your first response should be like the following:\nSummary:\n- <bullet point 1>\n- <bullet point 2>\n\nAction Points:\n- <action point 1>\n- <action point 2>\n\n<your response to all user instructions given>. \n\nBusiness Idea:\n<your exploration of the business idea>. <Stop your first answer here>. \n\n\nAfter your first answer you will conduct a discussion with Bernard.",
+            "You are an assistant that will help the user by taking their idea and optionally instructions on how the idea should be explored. In this case, your job is not to follow the instructions, nor explore the idea, rather place the idea (well-written and including all details mentioned by user) and instructions in separate parts in your response. Your response should be formatted as follows: BEGIN_IDEA\n{idea}\nEND_IDEA\nBEGIN_INSTRUCTIONS\n{instructions}\nEND_INSTRUCTIONS. *only* include the BEGIN_INSTRUCTIONS and END_INSTRUCTIONS if the user has provided instructions as stated earlier.",
         },
+        { role: "user", content: transcription },
+      ],
+      apiKey,
+      "gpt-4"
+    );
+
+    context.log("ideaFacilitatorResponse: " + ideaFacilitatorResponse);
+
+    // Extract idea and instructions from Chatbot 3's response
+    const ideaMatch = ideaFacilitatorResponse.match(
+      /BEGIN_IDEA([\s\S]+?)END_IDEA/
+    );
+    const instructionsMatch = ideaFacilitatorResponse.match(
+      /BEGIN_INSTRUCTIONS([\s\S]+?)END_INSTRUCTIONS/
+    );
+
+    if (!ideaMatch) {
+      throw new Error(
+        "Could not find the idea in the ideaFacilitatorResponse."
+      );
+    }
+
+    const idea = ideaMatch[1].trim();
+    const instructions = instructionsMatch ? instructionsMatch[1].trim() : null;
+
+    // Start a conversation between Alfred (Chatbot 1) and Bernard (Chatbot 2)
+    const alfredConversation = [
+      {
+        role: "system",
+        content: `Alfred, you are an AI chatbot and your role is to be a curious optimist and idea generator. You will be discussing ideas with Bernard, another AI chatbot. Explore the idea given by a human: '${idea}'. Encourage creative thinking, curiosity, and optimism while discussing the idea. Actively listen, ask clarifying questions, and build upon the idea. Provide extensive and well-thought-out answers. Be concise and prioritize the content of your contributions rather than the formalities of dialogue. If you feel the conversation has reached a natural conclusion or has become repetitive, use the stop word 'END_CONVERSATION.' Follow any additional specific instructions: '${instructions}'.`,
+      },
+    ];
+
+    const bernardConversation = [
+      {
+        role: "system",
+        content: `Bernard, you are an AI chatbot and your role is to be a constructive critic and analytical thinker. You will be discussing ideas with Alfred, another AI chatbot. Explore the idea given by a human: '${idea}'. Analyze and evaluate the idea critically, focusing on feasibility, practicality, and potential challenges. Offer constructive feedback and data-driven insights, considering different perspectives and risks. Provide extensive and well-thought-out answers. Be concise and prioritize the content of your critiques rather than the formalities of dialogue. If you feel the conversation has reached a natural conclusion or has become repetitive, use the stop word 'END_CONVERSATION.' Follow any additional specific instructions: '${instructions}'.`,
+      },
+    ];
+
+    let ongoingConversation = true;
+    let chatbotRole = "Alfred";
+    const maxBackAndForth = 8;
+    let currentIteration = 0;
+
+    while (ongoingConversation && currentIteration < maxBackAndForth) {
+        const conversation = chatbotRole === "Alfred" ? alfredConversation : bernardConversation;
+        const conversationTokens = numTokensFromMessages(conversation);
+      
+        const delta = 3400 - conversationTokens;
+        if(delta < 500) {
+            break;
+        }
+
+      
+      const response = await chat(
+        chatbotRole === "Alfred" ? alfredConversation : bernardConversation,
+        apiKey,
+        currentIteration < 2 ? "gpt-4" : "gpt-3.5-turbo",
+        delta //max_tokens
+      );
+
+      if (chatbotRole === "Alfred") {
+        alfredConversation.push({ role: "assistant", content: response });
+        bernardConversation.push({ role: "user", content: response });
+      } else {
+        bernardConversation.push({ role: "assistant", content: response });
+        alfredConversation.push({ role: "user", content: response });
+      }
+      if (response.includes("END_CONVERSATION")) {
+        ongoingConversation = false;
+      } else {
+        chatbotRole = chatbotRole === "Alfred" ? "Bernard" : "Alfred";
+      }
+
+      currentIteration++;
+    }
+
+    context.log("now generating summary");
+    const summaryResponse = await chat(
+      [
+        ...alfredConversation,
         {
           role: "user",
-          content: transcription,
+          content:
+            "Alfred, please summarize the main points of our discussion so far.",
         },
-      ];
+      ],
+      apiKey,
+      "gpt-3.5-turbo"
+    );
+    context.log("summaryResponse: " + summaryResponse);
 
-      const followup = await chat(messages, api_key);
+    const title = await generateTitle(summaryResponse, apiKey);
 
-      messages.push({
-        role: "assistant",
-        content: followup,
-      });
+    const emailText = formatEmail(
+      title,
+      idea,
+      summaryResponse,
+      alfredConversation
+    );
 
-      const system_prompt_assistant_2 =
-        "You are Bernard. You are a helpful assistant that loves to discuss and explore business ideas. You will talk to The AI assistant Alfred and Develop further the business idea. You should ask questions about the business idea and discuss it with Alfred. You should also give your own ideas about the business idea. Be concise and creative in your dialogue.";
-      // Now for the back and forth exploration of the business idea.
-      if (followup.includes("Business Idea:")) {
-        context.log("Business Idea found");
-        const businessIdea = followup.split("Business Idea:")[1].trim();
-        // copy messages but replace the first index with the new prompt
+    // Send the email.
+    const mailStatus = await sendMail(
+      email,
+      email,
+      "Memo: " + title,
+      emailText
+    );
 
-        context.log("Business Idea: " + businessIdea);
-
-        const messages2 = [
-          {
-            role: "system",
-            content: system_prompt_assistant_2,
-          },
-          {
-            role: "user",
-            content: businessIdea,
-          },
-        ];
-
-        // 3 times back and forth
-        for (let i = 0; i < 3; i++) {
-          context.log("Business Idea Assistant iteration " + i);
-          try{
-            let bia = await chat(messages2, api_key);
-            messages2.push({
-              role: "assistant",
-              content: bia,
-            });
-            messages.push({
-              role: "user",
-              content: bia,
-            });
-
-            let alf = await chat(messages, api_key);
-            messages.push({
-              role: "assistant",
-              content: alf,
-            });
-            messages2.push({
-              role: "user",
-              content: alf,
-            });
-          }
-          catch(e){
-            context.log.error("Error in Business Idea Assistant iteration " + i + ": " + e);
-          }
-        }
-      }
-
-      memo.conversation = messages;
-
-      // context.log("Updating Cosmos DB document");
-      // context.bindings.outDocument = {
-      //   ...doc,
-      //   memos: [...memos, memo],
-      // };
-
-      context.log("Sending mail");
-
-      try {
-        // Call the function with arguments
-        const mailStatus = await sendMemoAsMail(
-          context,
-          SENDER_ADDRESS,
-          email,
-          "<recipient-name>",
-          "MemoGPT: " + memo.title,
-          memo
-        );
-
-        context.log("Mail sent");
-        context.log(mailStatus);
-
-        //status: 'Succeeded', error: null
-        if (mailStatus.status != "Succeeded" || mailStatus.error != null) {
-          context.log.error("mail send Error:", mailStatus.error);
-          context.res = {
-            status: 500,
-            body: "Error when sending mail: " + mailStatus.error,
-          };
-          return;
-        }
-
-        context.res = {
-          status: 200,
-          body: "Successfully transcribed and sent memo.",
-        };
-
-        context.log("Completed processing request");
-      } catch (error) {
-        context.log.error("Error:", error.message);
-        context.res = {
-          status: 500,
-          body: "Error: " + error.message,
-        };
-      }
-    } catch (error) {
-      context.log.error("Error:", error.message);
-      context.res = {
-        status: 500,
-        body: "Error: " + error.message,
-      };
+    if (mailStatus.status !== "Succeeded" || mailStatus.error !== null) {
+      context.log.error("Error when sending mail: " + mailStatus.error);
     }
-  } else {
+
+    // If everything is successful
     context.res = {
-      status: 400,
-      body: "Please provide an audio file and API key.",
+      status: 200,
+      body: "Email sent successfully!",
+    };
+  } catch (e) {
+    context.log.error("Error in main function: ");
+
+    if (e.isAxiosError) context.log(e.response.data.error);
+    else context.log(e);
+
+    context.res = {
+      status: 500,
+      body: "Error in main function: " + e.message,
     };
   }
 };
